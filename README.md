@@ -1,5 +1,7 @@
 # EverythingController
 
+Hosted: https://xrchris.com/webxr/evc.html
+
 A single-file WebXR Mixed Reality experience that turns your body into a controller — no app download, no install, runs directly in the browser.
 
 Spheres spawn in your physical space. Use your feet and hands to hit them using real depth-sensor data as collision geometry.
