@@ -8,7 +8,7 @@ Spheres spawn in your physical space. Use your feet and hands to hit them using 
 
 ## Live Demo
 
-Open `evc.html` in a WebXR-capable browser (e.g. Meta Quest Browser) and tap **Enter XR**.
+Open `evc.html` in a WebXR-capable browser (e.g. Galaxy XR) and tap **Enter XR**.
 
 ---
 
