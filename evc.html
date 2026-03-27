@@ -1,0 +1,513 @@
+<!doctype html>
+<html lang="de">
+
+<head>
+    <meta charset="UTF-8" />
+    <title>EverythingController – WebXR Mixed Reality App</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+    <meta name="description" content="EverythingController: Eine WebXR Mixed-Reality-App mit Tiefensensor-Kollisionserkennung. Tritt und treffe Ziele in Augmented Reality – direkt im Browser, kein App-Download nötig." />
+    <meta name="keywords" content="WebXR, Mixed Reality, Augmented Reality, XR App, Browser AR, Depth Sensor, Passthrough, EverythingController, XR Blocks" />
+    <meta name="author" content="XRChris" />
+    <meta name="robots" content="index, follow" />
+
+    <!-- Open Graph / Social -->
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="EverythingController – WebXR Mixed Reality App" />
+    <meta property="og:description" content="Tritt und treffe Ziele in Augmented Reality – direkt im Browser, ohne App-Download. Powered by WebXR &amp; Tiefensensor-Kollisionserkennung." />
+    <meta property="og:locale" content="de_DE" />
+
+    <!-- Twitter Card -->
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="EverythingController – WebXR Mixed Reality App" />
+    <meta name="twitter:description" content="WebXR Mixed-Reality-App mit Tiefensensor-Kollisionserkennung. Direkt im Browser – kein Download." />
+    <link type="text/css" rel="stylesheet" href="https://xrblocks.github.io/css/xr.css" />
+    <script>
+        window.litDisableBundleWarning = true;
+    </script>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.182.0/build/three.module.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.182.0/examples/jsm/",
+          "troika-three-text": "https://cdn.jsdelivr.net/gh/protectwise/troika@028b81cf308f0f22e5aa8e78196be56ec1997af5/packages/troika-three-text/src/index.js",
+          "troika-three-utils": "https://cdn.jsdelivr.net/gh/protectwise/troika@v0.52.4/packages/troika-three-utils/src/index.js",
+          "troika-worker-utils": "https://cdn.jsdelivr.net/gh/protectwise/troika@v0.52.4/packages/troika-worker-utils/src/index.js",
+          "bidi-js": "https://esm.sh/bidi-js@%5E1.0.2?target=es2022",
+          "webgl-sdf-generator": "https://esm.sh/webgl-sdf-generator@1.1.1/es2022/webgl-sdf-generator.mjs",
+          "lit": "https://cdn.jsdelivr.net/gh/lit/dist@3/core/lit-core.min.js",
+          "lit/": "https://esm.run/lit@3/",
+          "xrblocks": "https://cdn.jsdelivr.net/npm/xrblocks@0.11.0/build/xrblocks.js",
+          "xrblocks/addons/": "https://cdn.jsdelivr.net/npm/xrblocks@0.11.0/build/addons/"
+        }
+      }
+    </script>
+</head>
+
+<body>
+    <script type="module">
+        import 'xrblocks/addons/simulator/SimulatorAddons.js';
+        import * as THREE from 'three';
+        import * as xb from 'xrblocks';
+
+        class KickTracker extends xb.Script {
+            constructor() {
+                super();
+                this.targets = [];
+
+                this.maxTargets = 5;
+
+                this.modes = ['air', 'incoming'];
+                this.modeLabels = ['Air', 'Defense'];
+                this.modeColors = ['#66ccff', '#ffaa00'];
+                this.currentModeIndex = 0;
+
+                this.ballRadius = 0.12;
+                this.floorTolerance = 0.08;
+                this.hitTolerance = 0.10;
+                this.xOffset = -0.20;
+
+                this.debugEnabled = false;
+                this.occlusionEnabled = false;
+                this.groundOffset = -0.20;
+                this.debugGridSize = 30;
+                this.cubeSize = 0.05;
+
+                this._unprojected = new THREE.Vector3();
+                this._cameraDir = new THREE.Vector3();
+                this._rayDir = new THREE.Vector3();
+                this._currentOffsetVec = new THREE.Vector3();
+                this._hitPos = new THREE.Vector3();
+                this._dummy = new THREE.Object3D();
+                this._colorFloor = new THREE.Color(0xff0000);
+                this._colorLeg = new THREE.Color(0x00ff00);
+
+                this._audioCtx = null;
+            }
+
+            playDestroySound() {
+                try {
+                    if (!this._audioCtx) {
+                        this._audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                    }
+                    const ctx = this._audioCtx;
+                    const now = ctx.currentTime;
+
+                    // 8-bit style descending square wave burst
+                    const osc = ctx.createOscillator();
+                    const gain = ctx.createGain();
+                    osc.connect(gain);
+                    gain.connect(ctx.destination);
+
+                    osc.type = 'square';
+                    osc.frequency.setValueAtTime(520, now);
+                    osc.frequency.setValueAtTime(380, now + 0.04);
+                    osc.frequency.setValueAtTime(240, now + 0.08);
+                    osc.frequency.setValueAtTime(120, now + 0.12);
+
+                    gain.gain.setValueAtTime(0.25, now);
+                    gain.gain.setValueAtTime(0.25, now + 0.10);
+                    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
+
+                    osc.start(now);
+                    osc.stop(now + 0.18);
+                } catch (e) { /* audio not available */ }
+            }
+
+            init() {
+                // Shadows
+                const renderer = xb.core.renderer;
+                if (renderer) {
+                    renderer.shadowMap.enabled = true;
+                    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+                }
+
+                // Lighting
+                this.add(new THREE.HemisphereLight(0xffffff, 0x444444, 2));
+                const dirLight = new THREE.DirectionalLight(0xffffff, 3);
+                dirLight.position.set(0, 3, 0);
+                dirLight.castShadow = true;
+                dirLight.shadow.mapSize.width = 1024;
+                dirLight.shadow.mapSize.height = 1024;
+                dirLight.shadow.camera.near = 0.1;
+                dirLight.shadow.camera.far = 12;
+                dirLight.shadow.camera.left = -4;
+                dirLight.shadow.camera.right = 4;
+                dirLight.shadow.camera.top = 4;
+                dirLight.shadow.camera.bottom = -4;
+                dirLight.shadow.bias = -0.001;
+                this.add(dirLight);
+
+                // Invisible shadow-receiving floor
+                this.floorMesh = new THREE.Mesh(
+                    new THREE.PlaneGeometry(12, 12),
+                    new THREE.ShadowMaterial({ opacity: 0.35 })
+                );
+                this.floorMesh.rotation.x = -Math.PI / 2;
+                this.floorMesh.position.y = this.groundOffset;
+                this.floorMesh.receiveShadow = true;
+                this.add(this.floorMesh);
+
+                // Debug point cloud
+                const debugGeom = new THREE.BoxGeometry(this.cubeSize, this.cubeSize, this.cubeSize);
+                this.debugMat = new THREE.MeshPhongMaterial({ color: 0xffffff, transparent: true, opacity: 0.4 });
+                this.occlusionMat = new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: true });
+                this.debugPoints = new THREE.InstancedMesh(debugGeom, this.debugMat, this.debugGridSize * this.debugGridSize);
+                this.debugPoints.frustumCulled = false;
+                for (let i = 0; i < this.debugPoints.count; i++) {
+                    this.debugPoints.setColorAt(i, new THREE.Color(0xffffff));
+                }
+                this.debugPoints.instanceColor.needsUpdate = true;
+                this.debugPoints.visible = false;
+                this.add(this.debugPoints);
+
+                // ── UI Panel ──
+                this.uiPanel = new xb.SpatialPanel({
+                    width: 1.68,
+                    height: 1.8,
+                    backgroundColor: '#0d0d0dcc',
+                    useDefaultPosition: false
+                });
+                this.uiPanel.position.set(0, 1.6, -2.0);
+                this.add(this.uiPanel);
+
+                const LABEL = 0.10;  // label text
+                const VALUE = 0.18;  // value text (between +/-)
+                const ICON  = 0.30;  // icon button size
+                const MODE_FS  = 0.30;  // mode buttons: 3× LABEL
+                const DEBUG_FS = 0.30;  // debug text: 3× LABEL
+                const grid = this.uiPanel.addGrid();
+
+                // ── Title ──   weights sum = 1.00
+                grid.addRow({ weight: 0.08 }).addText({
+                    text: 'EverythingController',
+                    fontSize: LABEL,
+                    fontColor: '#ffaa00'
+                });
+
+                // ── Mode buttons ──
+                const modeRow = grid.addRow({ weight: 0.10 });
+                this.modeBtns = this.modes.map((mode, idx) => {
+                    const isActive = idx === this.currentModeIndex;
+                    const btn = modeRow.addCol({ weight: 1 / this.modes.length }).addTextButton({
+                        text: this.modeLabels[idx],
+                        fontSize: MODE_FS,
+                        backgroundColor: isActive ? this.modeColors[idx] + 'cc' : '#333333'
+                    });
+                    btn.onTriggered = () => this.setMode(idx);
+                    return btn;
+                });
+
+                // ── Cam Offset X ──
+                const offsetRow = grid.addRow({ weight: 0.10 });
+                offsetRow.addCol({ weight: 0.35 }).addText({ text: 'Cam Offset X:', fontSize: LABEL, fontColor: '#aaaaaa' });
+                offsetRow.addCol({ weight: 0.12 }).addIconButton({ text: 'remove', fontSize: ICON }).onTriggered = () => {
+                    this.xOffset -= 0.02; this.updateSettingsUI();
+                };
+                this.offsetTextUI = offsetRow.addCol({ weight: 0.28 }).addText({ text: '-20 cm', fontSize: VALUE, fontColor: '#ccccff' });
+                offsetRow.addCol({ weight: 0.12 }).addIconButton({ text: 'add', fontSize: ICON }).onTriggered = () => {
+                    this.xOffset += 0.02; this.updateSettingsUI();
+                };
+
+                // ── Floor Filter ──
+                const floorRow = grid.addRow({ weight: 0.10 });
+                floorRow.addCol({ weight: 0.35 }).addText({ text: 'Floor Filter:', fontSize: LABEL, fontColor: '#aaaaaa' });
+                floorRow.addCol({ weight: 0.12 }).addIconButton({ text: 'remove', fontSize: ICON }).onTriggered = () => {
+                    this.floorTolerance = Math.max(0.0, this.floorTolerance - 0.02); this.updateSettingsUI();
+                };
+                this.floorTextUI = floorRow.addCol({ weight: 0.28 }).addText({ text: '8 cm', fontSize: VALUE, fontColor: '#66ff66' });
+                floorRow.addCol({ weight: 0.12 }).addIconButton({ text: 'add', fontSize: ICON }).onTriggered = () => {
+                    this.floorTolerance = Math.min(0.5, this.floorTolerance + 0.02); this.updateSettingsUI();
+                };
+
+                // ── Hit Radius ──
+                const hitRow = grid.addRow({ weight: 0.10 });
+                hitRow.addCol({ weight: 0.35 }).addText({ text: 'Hit Radius:', fontSize: LABEL, fontColor: '#aaaaaa' });
+                hitRow.addCol({ weight: 0.12 }).addIconButton({ text: 'remove', fontSize: ICON }).onTriggered = () => {
+                    this.hitTolerance = Math.max(0.0, this.hitTolerance - 0.05); this.updateSettingsUI();
+                };
+                this.hitTextUI = hitRow.addCol({ weight: 0.28 }).addText({ text: '10 cm', fontSize: VALUE, fontColor: '#ff6666' });
+                hitRow.addCol({ weight: 0.12 }).addIconButton({ text: 'add', fontSize: ICON }).onTriggered = () => {
+                    this.hitTolerance = Math.min(1.0, this.hitTolerance + 0.05); this.updateSettingsUI();
+                };
+
+                // ── Ground Offset ──
+                const groundRow = grid.addRow({ weight: 0.10 });
+                groundRow.addCol({ weight: 0.35 }).addText({ text: 'Ground Offset:', fontSize: LABEL, fontColor: '#aaaaaa' });
+                groundRow.addCol({ weight: 0.12 }).addIconButton({ text: 'remove', fontSize: ICON }).onTriggered = () => {
+                    this.groundOffset = parseFloat((this.groundOffset - 0.02).toFixed(2));
+                    this.floorMesh.position.y = this.groundOffset; this.updateSettingsUI();
+                };
+                this.groundOffsetUI = groundRow.addCol({ weight: 0.28 }).addText({ text: '-20 cm', fontSize: VALUE, fontColor: '#ffaa66' });
+                groundRow.addCol({ weight: 0.12 }).addIconButton({ text: 'add', fontSize: ICON }).onTriggered = () => {
+                    this.groundOffset = parseFloat((this.groundOffset + 0.02).toFixed(2));
+                    this.floorMesh.position.y = this.groundOffset; this.updateSettingsUI();
+                };
+
+                // ── Cube Size ──
+                const cubeRow = grid.addRow({ weight: 0.10 });
+                cubeRow.addCol({ weight: 0.35 }).addText({ text: 'Cube Size:', fontSize: LABEL, fontColor: '#aaaaaa' });
+                cubeRow.addCol({ weight: 0.12 }).addIconButton({ text: 'remove', fontSize: ICON }).onTriggered = () => {
+                    this.cubeSize = Math.max(0.001, parseFloat((this.cubeSize - 0.001).toFixed(3)));
+                    this._rebuildDebugGeometry(); this.updateSettingsUI();
+                };
+                this.cubeSizeUI = cubeRow.addCol({ weight: 0.28 }).addText({ text: '5 cm', fontSize: VALUE, fontColor: '#ffcc44' });
+                cubeRow.addCol({ weight: 0.12 }).addIconButton({ text: 'add', fontSize: ICON }).onTriggered = () => {
+                    this.cubeSize = Math.min(0.20, parseFloat((this.cubeSize + 0.001).toFixed(3)));
+                    this._rebuildDebugGeometry(); this.updateSettingsUI();
+                };
+
+                // ── Debug toggle ──
+                const debugRow = grid.addRow({ weight: 0.09 });
+                debugRow.addCol({ weight: 0.55 }).addText({ text: 'Debug:', fontSize: DEBUG_FS / 3, fontColor: '#555555' });
+                this.debugBtn = debugRow.addCol({ weight: 0.35 }).addTextButton({
+                    text: 'OFF', fontSize: DEBUG_FS, backgroundColor: '#333333'
+                });
+                this.debugBtn.onTriggered = () => {
+                    this.debugEnabled = !this.debugEnabled;
+                    this.debugBtn.setText(this.debugEnabled ? 'ON' : 'OFF');
+                    this.debugBtn.backgroundColor = this.debugEnabled ? '#22aa22' : '#333333';
+                    this._updateDebugMesh();
+                };
+
+                // ── Occlusion toggle ──
+                const occRow = grid.addRow({ weight: 0.08 });
+                occRow.addCol({ weight: 0.55 }).addText({ text: 'Occlusion:', fontSize: DEBUG_FS / 3, fontColor: '#555555' });
+                this.occBtn = occRow.addCol({ weight: 0.35 }).addTextButton({
+                    text: 'OFF', fontSize: DEBUG_FS, backgroundColor: '#333333'
+                });
+                this.occBtn.onTriggered = () => {
+                    this.occlusionEnabled = !this.occlusionEnabled;
+                    this.occBtn.setText(this.occlusionEnabled ? 'ON' : 'OFF');
+                    this.occBtn.backgroundColor = this.occlusionEnabled ? '#aa6600' : '#333333';
+                    this._updateDebugMesh();
+                };
+
+                this.respawnAllTargets();
+                this.updateSettingsUI();
+            }
+
+            _rebuildDebugGeometry() {
+                // Grid density scales inversely with cube size, capped at 120×120 = 14400
+                this.debugGridSize = Math.min(120, Math.round(30 * 0.05 / this.cubeSize));
+
+                this.remove(this.debugPoints);
+                this.debugPoints.geometry.dispose();
+
+                const geom = new THREE.BoxGeometry(this.cubeSize, this.cubeSize, this.cubeSize);
+                const count = this.debugGridSize * this.debugGridSize;
+                this.debugPoints = new THREE.InstancedMesh(geom, this.debugMat, count);
+                this.debugPoints.frustumCulled = false;
+
+                for (let i = 0; i < count; i++) {
+                    this.debugPoints.setColorAt(i, new THREE.Color(0xffffff));
+                }
+                this.debugPoints.instanceColor.needsUpdate = true;
+                this.debugPoints.material = this.occlusionEnabled ? this.occlusionMat : this.debugMat;
+                this.debugPoints.visible = this.debugEnabled || this.occlusionEnabled;
+                this.add(this.debugPoints);
+            }
+
+            _updateDebugMesh() {
+                this.debugPoints.material = this.occlusionEnabled ? this.occlusionMat : this.debugMat;
+                this.debugPoints.visible = this.debugEnabled || this.occlusionEnabled;
+            }
+
+            updateSettingsUI() {
+                this.floorTextUI.setText(Math.round(this.floorTolerance * 100) + ' cm');
+                this.hitTextUI.setText(Math.round(this.hitTolerance * 100) + ' cm');
+                const cm = Math.round(this.xOffset * 100);
+                this.offsetTextUI.setText((cm > 0 ? '+' : '') + cm + ' cm');
+                this.cubeSizeUI.setText((this.cubeSize * 100).toFixed(1) + ' cm');
+                const gcm = Math.round(this.groundOffset * 100);
+                this.groundOffsetUI.setText((gcm > 0 ? '+' : '') + gcm + ' cm');
+            }
+
+            setMode(idx) {
+                this.currentModeIndex = idx;
+                this.modeBtns.forEach((btn, i) => {
+                    btn.backgroundColor = i === idx ? this.modeColors[i] + 'cc' : '#333333';
+                });
+                this.respawnAllTargets();
+            }
+
+            respawnAllTargets() {
+                for (const target of this.targets) this.remove(target);
+                this.targets = [];
+                for (let i = 0; i < this.maxTargets; i++) this.spawnTarget();
+            }
+
+            spawnTarget() {
+                const mode = this.modes[this.currentModeIndex];
+                const geometry = new THREE.SphereGeometry(this.ballRadius, 32, 32);
+                const material = new THREE.MeshStandardMaterial({
+                    color: new THREE.Color().setHSL(Math.random(), 0.8, 0.5),
+                    emissive: new THREE.Color().setHSL(Math.random(), 0.8, 0.2),
+                    roughness: 0.2,
+                    metalness: 0.5
+                });
+                const target = new THREE.Mesh(geometry, material);
+                const angle = (Math.random() - 0.5) * Math.PI * 0.8;
+
+                if (mode === 'air') {
+                    const distance = 1.6 + Math.random() * 0.6;
+                    const height = 0.4 + Math.random() * 0.6;
+                    target.position.set(Math.sin(angle) * distance, height, -Math.cos(angle) * distance);
+                    target.userData = {
+                        state: 'hovering',
+                        baseY: height,
+                        randomOffset: Math.random() * 100,
+                        velocity: new THREE.Vector3()
+                    };
+                } else if (mode === 'incoming') {
+                    const distance = 3.5 + Math.random() * 1.0;
+                    const height = 0.2 + Math.random() * 0.8;
+                    target.position.set(Math.sin(angle) * distance, height, -Math.cos(angle) * distance);
+                    const dirToCam = new THREE.Vector3(0, height, 0).sub(target.position).normalize();
+                    target.userData = {
+                        state: 'incoming',
+                        velocity: dirToCam.multiplyScalar(0.8 + Math.random() * 1.5)
+                    };
+                }
+
+                target.castShadow = true;
+                this.add(target);
+                this.targets.push(target);
+            }
+
+            update() {
+                const camera = xb.core.camera;
+                const depth = xb.core.depth;
+                const time = performance.now() * 0.002;
+                const dt = xb.getDeltaTime();
+
+                // Update game objects
+                for (let i = this.targets.length - 1; i >= 0; i--) {
+                    const target = this.targets[i];
+                    const state = target.userData.state;
+
+                    if (state === 'hovering') {
+                        target.position.y = target.userData.baseY + Math.sin(time + target.userData.randomOffset) * 0.05;
+                    } else if (state === 'incoming') {
+                        target.position.add(target.userData.velocity.clone().multiplyScalar(dt));
+                        if (target.position.z > 0.5) {
+                            this.remove(target);
+                            this.targets.splice(i, 1);
+                            this.spawnTarget();
+                            continue;
+                        }
+                    } else if (state === 'kicked') {
+                        target.position.add(target.userData.velocity);
+                        target.userData.velocity.y -= 0.01;
+                        target.scale.multiplyScalar(0.90);
+                        if (target.scale.x < 0.05) {
+                            this.remove(target);
+                            this.targets.splice(i, 1);
+                            this.spawnTarget();
+                            continue;
+                        }
+                    }
+                }
+
+                // Collision & debug loop
+                if (depth && depth.enabled) {
+                    const camPos = camera.position;
+                    camera.getWorldDirection(this._cameraDir);
+                    const cameraRight = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+                    this._currentOffsetVec.copy(cameraRight).multiplyScalar(this.xOffset);
+
+                    const hitRadiusTotal = this.ballRadius + this.hitTolerance;
+                    const hitRadiusSq = hitRadiusTotal * hitRadiusTotal;
+                    let instanceIdx = 0;
+
+                    for (let i = 0; i < this.debugGridSize; i++) {
+                        for (let j = 0; j < this.debugGridSize; j++) {
+                            const u = i / (this.debugGridSize - 1);
+                            const v = j / (this.debugGridSize - 1);
+                            const actualDepth = depth.getDepth(u, v);
+                            const isValidDepth = (actualDepth > 0.1 && actualDepth < 4.0);
+
+                            if (isValidDepth) {
+                                const ndcX = u * 2 - 1;
+                                const ndcY = v * 2 - 1;
+                                this._unprojected.set(ndcX, ndcY, -1).unproject(camera);
+                                this._rayDir.copy(this._unprojected).sub(camPos).normalize();
+                                const cosTheta = this._rayDir.dot(this._cameraDir);
+                                const distanceAlongRay = actualDepth / cosTheta;
+                                this._hitPos.copy(camPos)
+                                    .addScaledVector(this._rayDir, distanceAlongRay)
+                                    .add(this._currentOffsetVec);
+
+                                const isGreenCube = this._hitPos.y > this.floorTolerance;
+
+                                if (isGreenCube) {
+                                    for (let t = this.targets.length - 1; t >= 0; t--) {
+                                        const target = this.targets[t];
+                                        const s = target.userData.state;
+                                        if (s === 'hovering' || s === 'incoming') {
+                                            if (this._hitPos.distanceToSquared(target.position) <= hitRadiusSq) {
+                                                this.hitTarget(target);
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if (this.debugEnabled) {
+                                    this._dummy.position.copy(this._hitPos);
+                                    this._dummy.scale.set(1, 1, 1);
+                                    this._dummy.updateMatrix();
+                                    this.debugPoints.setMatrixAt(instanceIdx, this._dummy.matrix);
+                                    this.debugPoints.setColorAt(instanceIdx, isGreenCube ? this._colorLeg : this._colorFloor);
+                                }
+                            } else if (this.debugEnabled) {
+                                this._dummy.scale.set(0, 0, 0);
+                                this._dummy.updateMatrix();
+                                this.debugPoints.setMatrixAt(instanceIdx, this._dummy.matrix);
+                            }
+
+                            if (this.debugEnabled) instanceIdx++;
+                        }
+                    }
+
+                    if (this.debugEnabled) {
+                        this.debugPoints.instanceMatrix.needsUpdate = true;
+                        this.debugPoints.instanceColor.needsUpdate = true;
+                    }
+                }
+            }
+
+            hitTarget(target) {
+                target.userData.state = 'kicked';
+                const mode = this.modes[this.currentModeIndex];
+                const dir = target.position.clone().sub(xb.core.camera.position).normalize();
+
+                if (mode === 'incoming') {
+                    target.userData.velocity = dir.clone().multiplyScalar(0.2);
+                    target.userData.velocity.y = 0.15;
+                } else {
+                    target.userData.velocity = dir.clone().multiplyScalar(0.15);
+                    target.userData.velocity.y = 0.1;
+                }
+
+                target.material.emissive.setHex(0xffffff);
+                this.playDestroySound();
+            }
+        }
+
+        document.addEventListener('DOMContentLoaded', async () => {
+            const options = new xb.Options();
+            options.enableUI();
+            options.depth = new xb.DepthOptions(xb.xrDepthMeshOptions);
+            options.depth.depthTexture.enabled = true;
+            options.setAppTitle('EverythingController');
+
+            xb.add(new KickTracker());
+            await xb.init(options);
+
+            if (xb.core.depth && xb.core.depth.depthMesh) {
+                xb.core.depth.depthMesh.visible = false;
+            }
+        });
+    </script>
+</body>
+
+</html>
